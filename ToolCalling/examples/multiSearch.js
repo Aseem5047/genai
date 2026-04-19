@@ -1,6 +1,37 @@
 import Groq from "groq-sdk";
 import { tavily } from "@tavily/core";
 import ora from "ora";
+import readline from "readline";
+import { marked } from "marked";
+import TerminalRenderer from "marked-terminal";
+
+marked.setOptions({ renderer: new TerminalRenderer() });
+
+function renderMessage(text) {
+    let formatted = text;
+
+    formatted = formatted.replace(/^TITLE: (.*)$/gm, "\n## $1");
+    formatted = formatted.replace(/^SECTION: (.*)$/gm, "\n### $1");
+    formatted = formatted.replace(/^POINT: (.*)$/gm, "\n• $1");
+
+    return marked(formatted);
+}
+
+function printResult(result) {
+    console.log("\n");
+    console.log(renderMessage(result.message));
+
+    if (result.sources?.length) {
+        console.log("Sources:\n");
+        result.sources.forEach((s, i) => console.log(`  ${i + 1}. ${s}`));
+    }
+
+    console.log("\n─────────────────────────────────────────");
+    console.log(`  Status     : ${result.status}`);
+    console.log(`  Steps      : ${result.steps_taken}`);
+    console.log(`  Query      : ${result.query}`);
+    console.log("─────────────────────────────────────────\n");
+}
 
 const groq = new Groq({
     apiKey: process.env.GROQ_API_KEY,
@@ -13,20 +44,162 @@ const tavily_client = tavily({
 const MODEL = "meta-llama/llama-4-scout-17b-16e-instruct";
 
 const SYSTEM_PROMPT = `
-You are a smart assistant.
+You are a precise and reliable research assistant with access to real-time web search.
 
-- You can use the tool "web_search" if needed.
+========================================
+CORE BEHAVIOR
+========================================
+- Always prefer verified information over guesses.
+- If information is missing, incomplete, or uncertain, explicitly say so.
+- Never fabricate facts.
 
-- If a tool returns status: "error", you may retry or answer with "uncertain".
+========================================
+WHEN TO USE SEARCH
+========================================
+Use web search when the query involves:
+- Current or dynamic data (prices, news, releases, statistics)
+- Specific entities (products, companies, people)
+- Comparisons or detailed specifications
 
-- When giving the final answer, return ONLY valid JSON:
+========================================
+SEARCH STRATEGY
+========================================
+- For comparisons:
+  - Search each entity separately
+  - Example:
+    Search 1: "[product A] full specs price"
+    Search 2: "[product B] full specs price"
+
+- Do NOT combine multiple entities into one search query.
+
+- If initial results are weak or insufficient:
+  - Reformulate the query using alternative strategies:
+    - "[product] specs"
+    - "[product] features"
+    - "[product] leaks"
+    - "[product] expected features"
+    - "[product] vs [competitor]"
+
+- Always adapt queries if results are poor. Never repeat the same query.
+
+========================================
+HANDLING WEAK OR MISSING DATA
+========================================
+- If tool returns "weak":
+  - Results are insufficient or low quality
+  - You MUST retry with a better query
+
+- If a product is unreleased or poorly documented:
+  - Clearly state it is not officially announced
+  - Use leaks, rumors, or expected specs
+  - Still provide the best possible comparison
+
+- You are NOT allowed to stop at "information not found"
+
+========================================
+SEARCH LIMITS
+========================================
+- Maximum 2 searches per response
+- Use them strategically
+- Prefer improving query quality over repeating queries
+
+========================================
+RESPONSE STRUCTURE
+========================================
+- Start with a direct answer
+- Then expand with supporting details
+- Minimum length: 150 words for non-trivial queries
+
+Use the following structure markers:
+
+TITLE: ...
+SECTION: ...
+POINT: ...
+
+Formatting rules:
+- Plain text only
+- Use \\n for line breaks
+- Do NOT use markdown, symbols, or formatting characters
+
+========================================
+COMPLETENESS REQUIREMENTS
+========================================
+- For comparisons:
+  - BOTH entities must be covered
+  - If one is missing, you MUST search again
+
+- Provide the best possible answer even with partial data
+
+========================================
+OUTPUT FORMAT (STRICT)
+========================================
+Return ONLY valid JSON:
 
 {
-    "status": "success" | "error" | "uncertain",
-    "message": string,
-    "sources": string[]
+  "status": "success" | "uncertain" | "error" | "weak",
+  "message": string,
+  "sources": string[]
+}
+
+========================================
+STATUS DEFINITIONS
+========================================
+- success   → complete and reliable answer
+- uncertain → partial or conflicting information
+- weak      → search results insufficient (must retry)
+- error     → cannot answer after all attempts
+
+========================================
+MESSAGE RULES
+========================================
+- Clear, natural language
+- No markdown or special formatting
+- Use \\n for line breaks
+
+========================================
+SOURCES RULES
+========================================
+- Include only relevant, supporting URLs
+- Minimum 2 sources if search is used
+- Omit sources if no search was needed
+
+========================================
+EXAMPLES
+========================================
+
+Factual:
+{
+  "status": "success",
+  "message": "TITLE: Population of Tokyo\n\nSECTION: Overview\nTokyo is the most populous metropolitan area in the world, with over 37 million people.\n\nSECTION: Context\nThis includes the wider metropolitan region spanning multiple prefectures.",
+  "sources": ["https://..."]
+}
+
+Comparison:
+{
+  "status": "success",
+  "message": "TITLE: Python vs JavaScript for Backend\n\nSECTION: Python\nPOINT: Simple and readable syntax\nPOINT: Strong in data science and AI\n\nSECTION: JavaScript\nPOINT: Same language for frontend and backend\nPOINT: Large ecosystem via npm\n\nSECTION: Verdict\nPython suits data-heavy tasks, JavaScript suits full-stack development.",
+  "sources": ["https://...", "https://..."]
+}
+
+Uncertain:
+{
+  "status": "uncertain",
+  "message": "TITLE: Future Interest Rates\n\nSECTION: Current State\nRates depend on inflation and economic indicators.\n\nSECTION: Uncertainty\nFuture movements cannot be predicted with certainty.\n\nSECTION: Conclusion\nOnly trends can be estimated, not exact values.",
+  "sources": ["https://..."]
 }
 `;
+
+// ========================
+// READLINE INTERFACE
+// ========================
+const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+});
+
+function ask(prompt) {
+    return new Promise((resolve) => rl.question(prompt, resolve));
+}
 
 // ========================
 // STEP LOGGER
@@ -43,13 +216,22 @@ function step(spinner, msg) {
 // ========================
 function safeParseJSON(text) {
     try {
-        return JSON.parse(text);
+        const cleaned = text
+            .replace(/^```json\s*/i, "")
+            .replace(/^```\s*/i, "")
+            .replace(/```\s*$/i, "")
+            .trim();
+
+        return JSON.parse(cleaned);
+
     } catch {
-        return {
-            status: "error",
-            message: "Invalid JSON from model",
-            raw: text,
-        };
+        try {
+            // Fix unescaped newlines inside strings
+            const fixed = text.replace(/\n/g, "\\n");
+            return JSON.parse(fixed);
+        } catch {
+            return { status: "error", message: "Invalid JSON from model", raw: text };
+        }
     }
 }
 
@@ -60,15 +242,26 @@ async function callLLM(messages, tools, allowTools = true) {
     return groq.chat.completions.create({
         model: MODEL,
         temperature: 0,
+        // response_format: { type: "json_object" },
         messages,
-        tools,
-        tool_choice: allowTools ? "auto" : "none",
+        ...(allowTools && { tools, tool_choice: "auto" }),
     });
 }
 
 // ========================
 // WEB SEARCH TOOL
 // ========================
+
+function isWeakResult(results) {
+    if (!results || results.length < 2) return true;
+
+    const weak = results.filter(r =>
+        !r.summary || r.summary.length < 100
+    );
+
+    return weak.length > results.length * 0.6;
+}
+
 async function webSearch(query) {
     try {
         const res = await fetch("https://api.tavily.com/search", {
@@ -89,9 +282,13 @@ async function webSearch(query) {
         const data = await res.json();
 
         return {
-            status: "success",
+            status: isWeakResult(data.results) ? "weak" : "success",
             answer: data.answer || "",
-            results: data.results?.slice(0, 3) || [],
+            results: data.results?.slice(0, 5).map(r => ({
+                title: r.title,
+                url: r.url,
+                summary: r.content?.slice(0, 500),
+            })) || [],
         };
 
     } catch (primaryError) {
@@ -102,9 +299,13 @@ async function webSearch(query) {
             });
 
             return {
-                status: "success",
+                status: isWeakResult(data.results) ? "weak" : "success",
                 answer: data.answer || "",
-                results: data.results?.slice(0, 3) || [],
+                results: data.results?.slice(0, 5).map(r => ({
+                    title: r.title,
+                    url: r.url,
+                    summary: r.content?.slice(0, 500),
+                })) || [],
                 fallback: true,
             };
 
@@ -162,15 +363,15 @@ async function runAgent(question, spinner) {
     const MAX_SEARCHES = 2;
     let searchCount = 0;
     let justCalledTools = false;
+    let forceNoTools = false;
+    let previousQueries = [];
 
     while (steps++ < MAX_STEPS) {
         step(spinner, `Thinking ... (step ${steps})`);
 
         let response;
         try {
-            // both checks: justCalledTools prevents the 400 error,
-            // searchCount caps total searches across the run
-            const allowTools = !justCalledTools && searchCount < MAX_SEARCHES;
+            const allowTools = !justCalledTools && !forceNoTools && searchCount < MAX_SEARCHES;
             response = await callLLM(messages, tools, allowTools);
         } catch (err) {
             spinner.fail("LLM call failed");
@@ -186,45 +387,131 @@ async function runAgent(question, spinner) {
 
         const msg = response.choices[0].message;
         messages.push(msg);
-        justCalledTools = false;  // reset every iteration
+        justCalledTools = false;
 
-        // Final answer
-        if (!msg.tool_calls) {
+        if (!msg.tool_calls || msg.tool_calls.length === 0) {
             step(spinner, "Processing final answer ...");
+
             const parsed = safeParseJSON(msg.content);
 
+            // JSON FIX
             if (parsed.raw) {
-                step(spinner, "LLM is thinking, continuing ...");
+                if (steps >= MAX_STEPS - 1) {
+                    return {
+                        status: "uncertain",
+                        message: "Model returned invalid JSON:\n\n" + parsed.raw,
+                        sources: [],
+                        query: question,
+                        steps_taken: steps
+                    };
+                }
+
+                messages.push({
+                    role: "user",
+                    content: "Return ONLY valid JSON with keys: status, message, sources."
+                });
                 continue;
             }
 
-            if (["success", "error"].includes(parsed.status)) {
+            // SUCCESS
+            if (parsed.status === "success") {
                 spinner.succeed("Done");
                 return { ...parsed, query: question, steps_taken: steps };
             }
 
-            if (parsed.status === "uncertain") {
-                step(spinner, "Uncertain, continuing ...");
+            // WEAK
+
+            if (parsed.status === "weak") {
+                if (steps >= MAX_STEPS - 1) {
+                    spinner.succeed("Done (best effort with weak data)");
+                    return { ...parsed, query: question, steps_taken: steps };
+                }
+
+                step(spinner, "Weak results detected, reformulating search ...");
+
                 messages.push({
                     role: "user",
-                    content: "You are not done. Continue reasoning or use tools."
+                    content: `
+                        The previous search results were weak or insufficient.
+
+                        You MUST:
+                        - Reformulate the query using a different strategy
+                        - Use shorter or alternative keywords
+                        - Try one of:
+                        - "[product] specs"
+                        - "[product] features"
+                        - "[product] leaks"
+                        - "[product] expected specs"
+
+                        Do NOT repeat the same query.
+                        Then perform another search and return ONLY valid JSON.
+                    `
+                });
+
+                continue;
+            }
+
+            // UNCERTAIN
+            if (parsed.status === "uncertain") {
+                if (searchCount >= MAX_SEARCHES || steps >= MAX_STEPS - 1) {
+                    spinner.succeed("Done (best possible)");
+                    return { ...parsed, query: question, steps_taken: steps };
+                }
+
+                messages.push({
+                    role: "user",
+                    content: "Refine your answer using available information. Do NOT call tools unless necessary."
                 });
                 continue;
             }
+
+            // ERROR
+            if (parsed.status === "error") {
+                if (steps >= MAX_STEPS - 1 || searchCount >= MAX_SEARCHES) {
+                    spinner.fail("Failed");
+                    return { ...parsed, query: question, steps_taken: steps };
+                }
+
+                messages.push({
+                    role: "user",
+                    content: "Try a different approach. Return ONLY valid JSON."
+                });
+                continue;
+            }
+
+            // FALLBACK
+            forceNoTools = true;
+            messages.push({
+                role: "user",
+                content: "IMPORTANT: Do NOT call tools. Return ONLY valid JSON."
+            });
         }
 
-        // Tool calls
         for (const toolCall of msg.tool_calls) {
             const { name, arguments: argsStr } = toolCall.function;
 
+            if (name === "web_search" && searchCount >= MAX_SEARCHES) {
+                step(spinner, `Search budget exhausted, skipping: ${name}`);
+                messages.push({
+                    role: "tool",
+                    tool_call_id: toolCall.id,
+                    name: name,
+                    content: JSON.stringify({
+                        status: "error",
+                        message: "Search budget exhausted. Use results already retrieved to answer.",
+                    }),
+                });
+                continue;
+            }
+
             step(spinner, `Using tool: ${name}`);
 
-            // increment search count for budget tracking
             if (name === "web_search") searchCount++;
 
             let args;
             try {
                 args = JSON.parse(argsStr);
+                previousQueries.push(args.query);
             } catch {
                 messages.push({
                     role: "tool",
@@ -262,23 +549,46 @@ async function runAgent(question, spinner) {
                 };
             }
 
+            const simplified = {
+                status: result.status,
+                answer: result.answer,
+                key_points: result.results.map(r => r.summary).join("\n\n"),
+                sources: result.results.map(r => r.url)
+            };
+
             messages.push({
                 role: "tool",
                 tool_call_id: toolCall.id,
                 name: name,
-                content: JSON.stringify(result),
+                content: JSON.stringify(simplified),
             });
         }
 
-        // nudge the model to decide whether to search again or answer
         messages.push({
             role: "user",
             content: searchCount < MAX_SEARCHES
-                ? "Do you need to search for anything else? If yes, call the tool. If you have enough, return ONLY valid JSON."
+                ? `
+                    Evaluate the search results carefully.
+
+                    If the results are weak, incomplete, or missing key data:
+                    - You MUST perform another search with a better query
+
+                    If the results are sufficient:
+                    - Return the final answer in valid JSON
+
+                    Previous failed queries:
+                    ${previousQueries.join("\n")}
+
+                    Do NOT repeat them. Use a different strategy.
+                `
                 : "You have used all your searches. Return ONLY valid JSON now.",
         });
 
-        justCalledTools = true;  // set after all tool calls are processed
+        if (searchCount >= MAX_SEARCHES) {
+            forceNoTools = true;
+        }
+
+        justCalledTools = true;
     }
 
     spinner.fail("Max steps exceeded");
@@ -294,15 +604,43 @@ async function runAgent(question, spinner) {
 // ========================
 // RETRY WRAPPER
 // ========================
-async function runWithRetry(retries = 3) {
-    const question = "What's the price of iPhone 17 Pro Max?";
+
+
+async function isResearchQuery(question) {
+    const response = await groq.chat.completions.create({
+        model: "llama-3.1-8b-instant", // fast + cheap for classification
+        temperature: 0,
+        max_completion_tokens: 10,
+        // response_format: { type: "json_object" },
+        messages: [
+            {
+                role: "system",
+                content: `Classify the input as either "research" or "chat".
+- "research": questions, factual queries, comparisons, how-tos, news
+- "chat": greetings, small talk, thanks, farewells, identity questions, meta questions about the assistant (e.g., "what can you do", "who are you", etc)
+Reply with ONLY one word: research or chat.`
+            },
+            { role: "user", content: question }
+        ]
+    });
+
+    const label = response.choices[0].message.content.trim().toLowerCase();
+    return label === "research";
+}
+
+
+async function runWithRetry(question, retries = 3) {
     const spinner = ora("Starting agent ...").start();
 
     for (let i = 0; i < retries; i++) {
         try {
             step(spinner, `Attempt ${i + 1} ...`);
+            if (!await isResearchQuery(question)) {
+                console.log("\nAssistant: Hey there! Ask me anything — I can search the web and answer questions.\n");
+                continue;
+            }
             const result = await runAgent(question, spinner);
-            console.log(result);
+            printResult(result);
             return result;
         } catch (err) {
             spinner.warn(`Attempt ${i + 1} failed`);
