@@ -1,7 +1,6 @@
 import Groq from "groq-sdk";
 import { tavily } from "@tavily/core";
 import ora from "ora";
-import readline from "readline";
 
 const groq = new Groq({
     apiKey: process.env.GROQ_API_KEY,
@@ -28,18 +27,6 @@ You are a smart assistant.
     "sources": string[]
 }
 `;
-
-// ========================
-// READLINE INTERFACE
-// ========================
-const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-});
-
-function ask(prompt) {
-    return new Promise((resolve) => rl.question(prompt, resolve));
-}
 
 // ========================
 // STEP LOGGER
@@ -181,6 +168,8 @@ async function runAgent(question, spinner) {
 
         let response;
         try {
+            // both checks: justCalledTools prevents the 400 error,
+            // searchCount caps total searches across the run
             const allowTools = !justCalledTools && searchCount < MAX_SEARCHES;
             response = await callLLM(messages, tools, allowTools);
         } catch (err) {
@@ -197,8 +186,9 @@ async function runAgent(question, spinner) {
 
         const msg = response.choices[0].message;
         messages.push(msg);
-        justCalledTools = false;
+        justCalledTools = false;  // reset every iteration
 
+        // Final answer
         if (!msg.tool_calls) {
             step(spinner, "Processing final answer ...");
             const parsed = safeParseJSON(msg.content);
@@ -214,6 +204,7 @@ async function runAgent(question, spinner) {
             }
 
             if (parsed.status === "uncertain") {
+                step(spinner, "Uncertain, continuing ...");
                 messages.push({
                     role: "user",
                     content: "You are not done. Continue reasoning or use tools."
@@ -222,11 +213,13 @@ async function runAgent(question, spinner) {
             }
         }
 
+        // Tool calls
         for (const toolCall of msg.tool_calls) {
             const { name, arguments: argsStr } = toolCall.function;
 
             step(spinner, `Using tool: ${name}`);
 
+            // increment search count for budget tracking
             if (name === "web_search") searchCount++;
 
             let args;
@@ -277,6 +270,7 @@ async function runAgent(question, spinner) {
             });
         }
 
+        // nudge the model to decide whether to search again or answer
         messages.push({
             role: "user",
             content: searchCount < MAX_SEARCHES
@@ -284,7 +278,7 @@ async function runAgent(question, spinner) {
                 : "You have used all your searches. Return ONLY valid JSON now.",
         });
 
-        justCalledTools = true;
+        justCalledTools = true;  // set after all tool calls are processed
     }
 
     spinner.fail("Max steps exceeded");
@@ -300,14 +294,15 @@ async function runAgent(question, spinner) {
 // ========================
 // RETRY WRAPPER
 // ========================
-async function runWithRetry(question, retries = 3) {
+async function runWithRetry(retries = 3) {
+    const question = "What's the price of iPhone 17 Pro Max?";
     const spinner = ora("Starting agent ...").start();
 
     for (let i = 0; i < retries; i++) {
         try {
             step(spinner, `Attempt ${i + 1} ...`);
             const result = await runAgent(question, spinner);
-            console.log("\n", result);
+            console.log(result);
             return result;
         } catch (err) {
             spinner.warn(`Attempt ${i + 1} failed`);
@@ -326,34 +321,23 @@ async function runWithRetry(question, retries = 3) {
 }
 
 // ========================
-// INTERACTIVE REPL LOOP
+// RUN
 // ========================
-async function main() {
-    console.log("Query Assistant");
-    console.log("Enter your question below.");
-    console.log('Type "exit" or "quit" to end the session.\n');
+runWithRetry();
 
-    while (true) {
-        const input = await ask("You: ");
-        const question = input.trim();
+/*
 
-        if (!question) {
-            console.log("Please enter a valid question.\n");
-            continue;
-        }
+⠋ Starting agent...
+⠙ Attempt 1...
+⠹ Thinking... (step 1)
+⠸ Using tool: web_search
+⠼ Thinking... (step 2)
+⠴ Processing final answer...
+✔ Done
 
-        const lower = question.toLowerCase();
-        if (lower === "exit" || lower === "quit") {
-            console.log("Session ended.");
-            rl.close();
-            break;
-        }
-
-        console.log("\nProcessing...\n");
-        await runWithRetry(question);
-
-        console.log("\n--------------------------------\n");
-    }
+{
+  "status": "success"
+  "message": "The current price of Bitcoin is approximately $67,450 USD.",
 }
 
-main();
+ */
