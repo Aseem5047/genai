@@ -60,9 +60,11 @@ export default function ChatWindow() {
     };
 
     return (
-        <div className="flex flex-col w-full bg-white sm:max-w-md sm:mx-auto sm:my-4 sm:rounded-xl sm:shadow-lg" >
-            {/* Messages */}
-            <div className="flex-1 p-4 overflow-y-auto space-y-2">
+        <div className="h-full flex flex-col bg-white sm:max-w-md sm:mx-auto sm:rounded-xl sm:shadow-lg">
+
+            {/* Chat Messages */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-6">
+
                 {messages.map((msg, index) => (
                     <MessageBubble key={index} message={msg} />
                 ))}
@@ -76,12 +78,13 @@ export default function ChatWindow() {
                         }}
                     />
                 )}
+
                 <div ref={bottomRef} />
             </div>
 
-
-            {/* Input pinned bottom */}
+            {/* Input */}
             <InputBox onSend={handleSend} loading={loading} />
+
         </div>
     );
 }

@@ -2,10 +2,21 @@ import { callLLMWithRetry } from "./llm.js";
 import { tools, toolHandlers } from "./tools.js";
 import { safeParseJSON } from "./utils.js";
 import { SYSTEM_PROMPT } from "./prompt.js";
+import {
+    getMemoryContext,
+    addToMemory,
+    updateEntities,
+    updateSummary
+} from "./memory.js";
+import { isResearchQuery } from "../agent/services/researchQuery.js";
 
 export async function runAgent(question) {
+    if (await isResearchQuery(question)) {
+        await updateEntities(question);
+    }
     const messages = [
         { role: "system", content: SYSTEM_PROMPT },
+        ...getMemoryContext(),
         {
             role: "user",
             content: `
@@ -40,7 +51,7 @@ export async function runAgent(question) {
                 !forceNoTools &&
                 searchCount < MAX_SEARCHES;
 
-            response = await callLLMWithRetry(messages, tools, allowTools);
+            response = await callLLMWithRetry(messages, tools, allowTools, 3);
 
         } catch (err) {
             messages.push({
@@ -99,6 +110,11 @@ export async function runAgent(question) {
 
             // SUCCESS
             if (parsed.status === "success") {
+                addToMemory(question, parsed.message);
+                if (await isResearchQuery(question)) {
+                    await updateEntities(question);
+                }
+                updateSummary();
                 return { ...parsed, steps_taken: steps };
             }
 
@@ -146,6 +162,8 @@ export async function runAgent(question) {
             if (parsed.status === "uncertain") {
 
                 if (searchCount >= MAX_SEARCHES) {
+                    addToMemory(question, parsed.message);
+                    updateSummary();
                     return { ...parsed, steps_taken: steps };
                 }
 
@@ -224,7 +242,13 @@ export async function runAgent(question) {
             }
 
             if (args?.query) {
-                previousQueries.push(args.query);
+                previousQueries.push({
+                    query: args.query,
+                    step: steps
+                });
+
+                // keep only last 3
+                previousQueries = previousQueries.slice(-3);
             }
 
             if (name === "web_search") {
@@ -256,7 +280,7 @@ export async function runAgent(question) {
                     - return final JSON
 
                     Previous queries:
-                    ${previousQueries.join("\n")}
+                    ${previousQueries.map(q => q.query).join("\n")} 
                     `
                 : `
                     Search limit reached.
