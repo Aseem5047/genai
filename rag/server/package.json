@@ -12,6 +12,6 @@
   "dependencies": {
     "@langchain/community": "^1.1.27",
     "@langchain/core": "^1.1.41",
-    "pdf-parse": "^2.4.5"
+    "pdf-parse": "^1.1.4"
   }
 }
