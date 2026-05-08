@@ -5,7 +5,7 @@ import { ChromaClient } from "chromadb";
 import crypto from "crypto";
 
 async function getEmbedding(text) {
-    const res = await fetch("http://localhost:11434/api/embeddings", {
+    const res = await fetch("http://localhost:11434/api/embed", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
