@@ -4,6 +4,7 @@ import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 
 import { Pinecone } from "@pinecone-database/pinecone";
+import { generateAnswer } from "./chat";
 
 /* =========================================================
    CONFIG
@@ -25,6 +26,7 @@ const UPSERT_BATCH_SIZE = 100;
 const EMBEDDING_CONCURRENCY = 2;
 
 const OLLAMA_URL = "http://localhost:11434/api/embed";
+
 
 /* =========================================================
    INITIALIZE INDEX
@@ -60,7 +62,7 @@ async function ensureIndexExists() {
         );
     }
 
-    return pinecone.Index(indexName);
+    return pinecone.index(indexName);
 }
 
 const index = await ensureIndexExists();
@@ -235,12 +237,13 @@ export async function indexTheDocument(path) {
             i + UPSERT_BATCH_SIZE
         );
 
-        await pineconeNamespace.upsert({
-            vectors: batch,
-        });
+        if (!batch.length) continue;
+
+        await pineconeNamespace.upsert({ records: batch });
 
         console.log(
-            `Uploaded batch ${Math.floor(i / UPSERT_BATCH_SIZE) + 1}`
+            `Uploaded batch ${Math.floor(i / UPSERT_BATCH_SIZE) + 1
+            }`
         );
     }
 
@@ -253,6 +256,8 @@ export async function indexTheDocument(path) {
         chunks: vectors.length,
     };
 }
+
+
 
 /* =========================================================
    QUERY DOCUMENT
@@ -306,34 +311,19 @@ export async function queryDocument(
 
     const matches = results.matches.map((match) => ({
         score: match.score,
-
         text: match.metadata?.text,
-
         source: match.metadata?.source,
-
         page: match.metadata?.page,
-
         chunk: match.metadata?.chunk,
     }));
 
-    console.log("\n=== MATCHES ===\n");
+    // ✅ Filter low-confidence chunks before sending to LLM
+    const relevantMatches = matches.filter(m => m.score > 0.5);
 
-    for (const match of matches) {
-        console.log(`
-        Score: ${match.score}
+    // ✅ Generate answer from retrieved context
+    const answer = await generateAnswer(question, relevantMatches);
 
-        Source: ${match.source}
-
-        Page: ${match.page}
-
-        Text:
-        ${match.text}
-
-        -----------------------------------
-        `);
-    }
-
-    return matches;
+    return { answer, sources: relevantMatches };
 }
 
 /* =========================================================
@@ -352,17 +342,3 @@ export async function deleteDocument(path) {
     console.log("Document deleted");
 }
 
-/* =========================================================
-   EXAMPLE USAGE
-========================================================= */
-
-// await indexTheDocument("./documents/sample.pdf");
-
-// const results = await queryDocument(
-//     "What is this document about?",
-//     {
-//         topK: 3,
-//     }
-// );
-
-// console.log(results);

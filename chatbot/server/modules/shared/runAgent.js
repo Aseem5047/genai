@@ -122,7 +122,7 @@ export async function runAgent(question) {
             if (parsed.status === "weak") {
 
                 if (searchCount >= MAX_SEARCHES) {
-                    // 🔥 FORCE INFERENCE MODE
+                    // FORCE INFERENCE MODE
                     messages.push({
                         role: "user",
                         content: `
